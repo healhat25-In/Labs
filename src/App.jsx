@@ -1,4 +1,5 @@
-﻿import React, { useState, useEffect, useMemo } from 'react';
+﻿/* global __firebase_config, __app_id, __initial_auth_token */
+import React, { useState, useEffect, useMemo } from 'react';
 import {
     Search, ChevronDown, ChevronUp, ShieldCheck, MapPin, Clock,
     FlaskConical, Syringe, Info, BarChart3, X, Filter, Globe,
@@ -7,32 +8,62 @@ import {
 } from 'lucide-react';
 import { initializeApp } from 'firebase/app';
 import {
-    getAuth, signInAnonymously, onAuthStateChanged, signOut,
+    getAuth, signInAnonymously, onAuthStateChanged,
     signInWithCustomToken
 } from 'firebase/auth';
 import {
-    getFirestore, collection, addDoc, query, where, onSnapshot,
-    doc, updateDoc, deleteDoc, setDoc, getDoc, serverTimestamp, increment
+    getFirestore, collection, addDoc, query, onSnapshot,
+    doc, updateDoc, deleteDoc, setDoc, serverTimestamp, increment
 } from 'firebase/firestore';
 
 // --- FIREBASE CONFIGURATION ---
-// REPLACE THIS OBJECT WITH YOUR OWN KEYS FROM FIREBASE CONSOLE
+const envFirebaseConfig = {
+    apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
+    authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
+    projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
+    storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
+    messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
+    appId: import.meta.env.VITE_FIREBASE_APP_ID
+};
+// Support an injected JSON config (e.g., deployment environments) while defaulting to .env variables
 const firebaseConfig = typeof __firebase_config !== 'undefined'
     ? JSON.parse(__firebase_config)
-    : {
-        // Paste your keys here if running locally
-        apiKey: "YOUR_API_KEY",
-        authDomain: "YOUR_PROJECT.firebaseapp.com",
-        projectId: "YOUR_PROJECT_ID",
-        storageBucket: "YOUR_PROJECT.firebasestorage.app",
-        messagingSenderId: "SENDER_ID",
-        appId: "APP_ID"
-    };
+    : envFirebaseConfig;
 
-const app = initializeApp(firebaseConfig);
-const auth = getAuth(app);
-const db = getFirestore(app);
-const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+const isValidFirebaseConfig = (config) => {
+    if (!config) return false;
+    const required = ['apiKey', 'authDomain', 'projectId', 'appId'];
+    return required.every(
+        (key) =>
+            typeof config[key] === 'string' &&
+            config[key].trim() !== '' &&
+            !config[key].includes('YOUR_')
+    );
+};
+
+let firebaseInitError = null;
+let firebaseEnabled = false;
+let app = null;
+let auth = null;
+let db = null;
+
+try {
+    if (isValidFirebaseConfig(firebaseConfig)) {
+        app = initializeApp(firebaseConfig);
+        auth = getAuth(app);
+        db = getFirestore(app);
+        firebaseEnabled = true;
+    } else {
+        firebaseInitError = new Error('Firebase config missing or still using placeholders. Running in offline demo mode.');
+    }
+} catch (error) {
+    firebaseInitError = error;
+}
+
+const appId = import.meta.env.VITE_APP_ID
+    || (typeof __app_id !== 'undefined' ? __app_id : 'default-app-id');
+const initialAuthToken = import.meta.env.VITE_INITIAL_AUTH_TOKEN
+    || (typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : '');
 
 // --- JAIPUR DATA ---
 const INITIAL_LABS = [
@@ -221,7 +252,7 @@ const PrescriptionModal = ({ isOpen, onClose, user, onLogin }) => {
     const [view, setView] = useState('upload');
 
     useEffect(() => {
-        if (!isOpen || !user) return;
+        if (!isOpen || !user || !db) return;
         const q = query(
             collection(db, 'artifacts', appId, 'users', user.uid, 'prescriptions'),
         );
@@ -233,7 +264,10 @@ const PrescriptionModal = ({ isOpen, onClose, user, onLogin }) => {
     }, [isOpen, user]);
 
     const handleUpload = async () => {
-        if (!file || !user) return;
+        if (!file || !user || !db) {
+            alert("Uploads are unavailable in offline mode.");
+            return;
+        }
         setUploading(true);
         try {
             await addDoc(collection(db, 'artifacts', appId, 'users', user.uid, 'prescriptions'), {
@@ -246,6 +280,7 @@ const PrescriptionModal = ({ isOpen, onClose, user, onLogin }) => {
             setView('list');
         } catch (e) {
             console.error(e);
+            alert("Failed to upload. Please try again when online.");
         }
         setUploading(false);
     };
@@ -283,6 +318,20 @@ const PrescriptionModal = ({ isOpen, onClose, user, onLogin }) => {
                                 Sign In / Sign Up
                             </button>
                             <p className="text-xs text-gray-400 mt-4">No password required for this demo.</p>
+                        </div>
+                    ) : !db ? (
+                        <div className="flex-1 flex flex-col items-center justify-center text-center space-y-4">
+                            <AlertCircle className="w-10 h-10 text-yellow-500" />
+                            <h4 className="text-lg font-semibold text-gray-800">Offline demo mode</h4>
+                            <p className="text-sm text-gray-500 max-w-xs">
+                                Prescription uploads and history need Firebase. Add valid Firebase keys to enable this feature.
+                            </p>
+                            <button
+                                onClick={onClose}
+                                className="text-sm text-blue-600 hover:underline font-semibold"
+                            >
+                                Close
+                            </button>
                         </div>
                     ) : (
                         <div className="flex-1 flex flex-col">
@@ -375,7 +424,9 @@ export default function App() {
     const [showAdmin, setShowAdmin] = useState(false);
     const [showPrescription, setShowPrescription] = useState(false);
 
-    const [labs, setLabs] = useState([]);
+    const [labs, setLabs] = useState(() =>
+        firebaseEnabled ? [] : INITIAL_LABS.map((l, i) => ({ ...l, id: `init-${i}` }))
+    );
     const [comparisonList, setComparisonList] = useState([]);
     const [showCompareModal, setShowCompareModal] = useState(false);
 
@@ -384,9 +435,13 @@ export default function App() {
         brand: '', testName: 'Complete Blood Count (CBC)', price: '', location: 'Jaipur', website: '', trusted: false
     });
     const [trustedCriteria, setTrustedCriteria] = useState("We verify NABL accreditation and last 3 years of audit reports.");
+    const offlineMode = !firebaseEnabled;
+    const firebaseInitMessage = firebaseInitError ? firebaseInitError.message : null;
 
     // --- AUTH & INIT ---
     useEffect(() => {
+        if (!firebaseEnabled) return;
+
         const unsubAuth = onAuthStateChanged(auth, (currentUser) => {
             setUser(currentUser);
             if (currentUser) {
@@ -394,23 +449,16 @@ export default function App() {
                 updateDoc(statsRef, {
                     dailyUsers: increment(1),
                     monthlyUsers: increment(1)
-                }).catch(async (err) => {
+                }).catch(async () => {
                     await setDoc(statsRef, { dailyUsers: 1, monthlyUsers: 1, cityStats: {} });
-                });
+                }).catch(() => { /* swallow if offline */ });
             }
         });
 
         const labsRef = collection(db, 'artifacts', appId, 'public', 'data', 'labs');
         const unsubLabs = onSnapshot(query(labsRef), (snapshot) => {
             const fetchedLabs = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-            // Load initial Jaipur data if database is empty
-            if (fetchedLabs.length === 0 && !showAdmin) {
-                setLabs(INITIAL_LABS.map((l, i) => ({ ...l, id: `init-${i}` })));
-            } else {
-                // Combine initial with fetched (or just replace if you prefer)
-                // For this demo we'll use fetched if available, or initial if DB is empty
-                setLabs(fetchedLabs.length > 0 ? fetchedLabs : INITIAL_LABS.map((l, i) => ({ ...l, id: `init-${i}` })));
-            }
+            setLabs(fetchedLabs.length > 0 ? fetchedLabs : INITIAL_LABS.map((l, i) => ({ ...l, id: `init-${i}` })));
         });
 
         const statsRef = doc(db, 'artifacts', appId, 'public', 'data', 'analytics', 'summary');
@@ -426,9 +474,13 @@ export default function App() {
     }, []);
 
     const handleLogin = async () => {
+        if (!firebaseEnabled) {
+            alert("Login requires Firebase configuration. Running in offline demo mode.");
+            return;
+        }
         try {
-            if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-                await signInWithCustomToken(auth, __initial_auth_token);
+            if (initialAuthToken) {
+                await signInWithCustomToken(auth, initialAuthToken);
             } else {
                 await signInAnonymously(auth);
             }
@@ -439,6 +491,10 @@ export default function App() {
 
     // --- SECURE ADMIN ACCESS ---
     const handleAdminAccess = () => {
+        if (!firebaseEnabled) {
+            alert("Admin features need Firebase. Add valid keys to enable.");
+            return;
+        }
         const pin = prompt("Enter Admin PIN:");
         if (pin === "1234") {
             setShowAdmin(true);
@@ -460,6 +516,10 @@ export default function App() {
     };
 
     const handleAddLab = async () => {
+        if (!firebaseEnabled) {
+            alert("Cannot add labs in offline mode. Configure Firebase first.");
+            return;
+        }
         if (!newLabData.brand || !newLabData.price) return;
         try {
             await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'labs'), {
@@ -474,11 +534,16 @@ export default function App() {
             });
             setNewLabData({ brand: '', testName: 'Complete Blood Count (CBC)', price: '', location: 'Jaipur', website: '', trusted: false });
         } catch (e) {
+            console.error(e);
             alert("Error adding lab");
         }
     };
 
     const toggleLabTrust = async (lab) => {
+        if (!firebaseEnabled) {
+            alert("Trust toggle requires Firebase. Offline demo is read-only.");
+            return;
+        }
         if (String(lab.id).startsWith('init-')) {
             alert("Cannot edit mock data. Add a new lab to test admin features.");
             return;
@@ -491,6 +556,10 @@ export default function App() {
     };
 
     const deleteLab = async (id) => {
+        if (!firebaseEnabled) {
+            alert("Delete requires Firebase. Offline demo is read-only.");
+            return;
+        }
         if (String(id).startsWith('init-')) return;
         try {
             await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'labs', id));
@@ -670,6 +739,12 @@ export default function App() {
                     </div>
                 </div>
             </nav>
+
+            {offlineMode && (
+                <div className="bg-yellow-50 border border-yellow-200 text-yellow-800 px-4 py-3 text-sm text-center">
+                    Running in offline demo mode. Add Firebase credentials to enable login, uploads, and live data. {firebaseInitMessage && <span className="block text-xs text-yellow-700 mt-1">{firebaseInitMessage}</span>}
+                </div>
+            )}
 
             {/* --- HERO SECTION --- */}
             <div className={`bg-white pb-12 pt-8 px-4 shadow-sm relative z-20 ${selectedTest ? 'hidden' : 'block'}`}>
@@ -910,7 +985,9 @@ export default function App() {
             </div>
 
             {/* MODALS */}
-            <ComparisonModal labs={comparisonList} onClose={() => setShowCompareModal(false)} />
+            {showCompareModal && (
+                <ComparisonModal labs={comparisonList} onClose={() => setShowCompareModal(false)} />
+            )}
             <PrescriptionModal
                 isOpen={showPrescription}
                 onClose={() => setShowPrescription(false)}
